@@ -2,7 +2,7 @@
  * PosixHelperFunctions.c
  *
  *       Created on:  Mar 10, 2015
- *  Last Updated on:  Mar 07, 2019
+ *  Last Updated on:  Feb 25, 2020
  *           Author:  Will Hedgecock
  *
  * Copyright (C) 2012-2020 Fazecast, Inc.
@@ -517,7 +517,7 @@ int setBaudRateCustom(int portFD, baud_rate baudRate)
 		serInfo.flags &= ~ASYNC_SPD_MASK;
 		serInfo.flags |= ASYNC_SPD_CUST | ASYNC_LOW_LATENCY;
 		serInfo.custom_divisor = serInfo.baud_base / baudRate;
-		if (sersInfo.custom_divisor == 0)
+		if (serInfo.custom_divisor == 0)
 			serInfo.custom_divisor = 1;
 		retVal = ioctl(portFD, TIOCSSERIAL, &serInfo);
 	}

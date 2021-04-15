@@ -2,7 +2,7 @@
  * SerialPort_Posix.c
  *
  *       Created on:  Feb 25, 2012
- *  Last Updated on:  Feb 19, 2020
+ *  Last Updated on:  Apr 29, 2020
  *           Author:  Will Hedgecock
  *
  * Copyright (C) 2012-2020 Fazecast, Inc.
@@ -251,6 +251,7 @@ JNIEXPORT jlong JNICALL Java_com_fazecast_jSerialComm_SerialPort_openPortNative(
 	const char *portName = (*env)->GetStringUTFChars(env, portNameJString, NULL);
 	unsigned char isDtrEnabled = (*env)->GetBooleanField(env, obj, isDtrEnabledField);
 	unsigned char isRtsEnabled = (*env)->GetBooleanField(env, obj, isRtsEnabledField);
+	unsigned char rs485ModeEnabled = (*env)->GetBooleanField(env, obj, rs485ModeField);
 
 	// Try to open existing serial port with read/write access
 	int serialPortFD = -1;
@@ -259,7 +260,6 @@ JNIEXPORT jlong JNICALL Java_com_fazecast_jSerialComm_SerialPort_openPortNative(
 		// Ensure that multiple root users cannot access the device simultaneously
 		if (flock(serialPortFD, LOCK_EX | LOCK_NB) == -1)
 		{
-			tcdrain(serialPortFD);
 			while ((close(serialPortFD) == -1) && (errno == EINTR))
 				errno = 0;
 			serialPortFD = -1;
@@ -281,7 +281,8 @@ JNIEXPORT jlong JNICALL Java_com_fazecast_jSerialComm_SerialPort_openPortNative(
 #endif
 			if (!isDtrEnabled || !isRtsEnabled)
 				options.c_cflag &= ~HUPCL;
-			options.c_iflag |= BRKINT;
+			if (!rs485ModeEnabled)
+				options.c_iflag |= BRKINT;
 			tcsetattr(serialPortFD, TCSANOW, &options);
 
 			// Configure the port parameters and timeouts
@@ -290,7 +291,6 @@ JNIEXPORT jlong JNICALL Java_com_fazecast_jSerialComm_SerialPort_openPortNative(
 			else
 			{
 				// Close the port if there was a problem setting the parameters
-				tcdrain(serialPortFD);
 				while ((close(serialPortFD) == -1) && (errno == EINTR))
 					errno = 0;
 				serialPortFD = -1;
@@ -324,18 +324,22 @@ JNIEXPORT jboolean JNICALL Java_com_fazecast_jSerialComm_SerialPort_configPort(J
 	unsigned char isDtrEnabled = (*env)->GetBooleanField(env, obj, isDtrEnabledField);
 	unsigned char isRtsEnabled = (*env)->GetBooleanField(env, obj, isRtsEnabledField);
 	tcflag_t byteSize = (byteSizeInt == 5) ? CS5 : (byteSizeInt == 6) ? CS6 : (byteSizeInt == 7) ? CS7 : CS8;
-	tcflag_t stopBits = ((stopBitsInt == com_fazecast_jSerialComm_SerialPort_ONE_STOP_BIT) || (stopBitsInt == com_fazecast_jSerialComm_SerialPort_ONE_POINT_FIVE_STOP_BITS)) ? 0 : CSTOPB;
 	tcflag_t parity = (parityInt == com_fazecast_jSerialComm_SerialPort_NO_PARITY) ? 0 : (parityInt == com_fazecast_jSerialComm_SerialPort_ODD_PARITY) ? (PARENB | PARODD) : (parityInt == com_fazecast_jSerialComm_SerialPort_EVEN_PARITY) ? PARENB : (parityInt == com_fazecast_jSerialComm_SerialPort_MARK_PARITY) ? (PARENB | CMSPAR | PARODD) : (PARENB | CMSPAR);
-	tcflag_t CTSRTSEnabled = (((flowControl & com_fazecast_jSerialComm_SerialPort_FLOW_CONTROL_CTS_ENABLED) > 0) ||
-			((flowControl & com_fazecast_jSerialComm_SerialPort_FLOW_CONTROL_RTS_ENABLED) > 0)) ? CRTSCTS : 0;
 	tcflag_t XonXoffInEnabled = ((flowControl & com_fazecast_jSerialComm_SerialPort_FLOW_CONTROL_XONXOFF_IN_ENABLED) > 0) ? IXOFF : 0;
 	tcflag_t XonXoffOutEnabled = ((flowControl & com_fazecast_jSerialComm_SerialPort_FLOW_CONTROL_XONXOFF_OUT_ENABLED) > 0) ? IXON : 0;
 
 	// Set updated port parameters
 	tcgetattr(serialPortFD, &options);
-	options.c_cflag = (byteSize | stopBits | parity | CLOCAL | CREAD | CTSRTSEnabled);
-	if (parityInt == com_fazecast_jSerialComm_SerialPort_SPACE_PARITY)
-		options.c_cflag &= ~PARODD;
+	options.c_cflag &= ~(CSIZE | PARENB | CMSPAR | PARODD);
+	options.c_cflag |= (byteSize | parity | CLOCAL | CREAD);
+	if (stopBitsInt == com_fazecast_jSerialComm_SerialPort_TWO_STOP_BITS)
+		options.c_cflag |= CSTOPB;
+	else
+		options.c_cflag &= ~CSTOPB;
+	if (((flowControl & com_fazecast_jSerialComm_SerialPort_FLOW_CONTROL_CTS_ENABLED) > 0) || ((flowControl & com_fazecast_jSerialComm_SerialPort_FLOW_CONTROL_RTS_ENABLED) > 0))
+		options.c_cflag |= CRTSCTS;
+	else
+		options.c_cflag &= ~CRTSCTS;
 	if (!isDtrEnabled || !isRtsEnabled)
 		options.c_cflag &= ~HUPCL;
 	options.c_iflag &= ~(INPCK | IGNPAR | PARMRK | ISTRIP);
@@ -360,6 +364,7 @@ JNIEXPORT jboolean JNICALL Java_com_fazecast_jSerialComm_SerialPort_configPort(J
 	if (ioctl(serialPortFD, TIOCGSERIAL, &serInfo) == 0)
 	{
 		serInfo.xmit_fifo_size = sendDeviceQueueSize;
+		serInfo.flags |= ASYNC_LOW_LATENCY;
 		ioctl(serialPortFD, TIOCSSERIAL, &serInfo);
 	}
 #else
@@ -521,10 +526,10 @@ JNIEXPORT jboolean JNICALL Java_com_fazecast_jSerialComm_SerialPort_closePortNat
 	options.c_cc[VTIME] = 0;
 	int retVal = fcntl(serialPortFD, F_SETFL, flags);
 	tcsetattr(serialPortFD, TCSANOW, &options);
-	tcdrain(serialPortFD);
 
 	// Close the port
 	flock(serialPortFD, LOCK_UN | LOCK_NB);
+	fdatasync(serialPortFD);
 	while ((close(serialPortFD) == -1) && (errno == EINTR))
 		errno = 0;
 	(*env)->SetLongField(env, obj, serialPortFdField, -1l);
